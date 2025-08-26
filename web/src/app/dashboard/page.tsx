@@ -4,6 +4,9 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { supabase } from '../../lib/supabaseClient';
 
+// -----------------------------
+// Types
+// -----------------------------
 type SessionRow = {
   id: string;
   started_at: string;
@@ -20,6 +23,141 @@ type ContractionRow = {
   source: 'manual' | 'device';
 };
 
+// -----------------------------
+// UI helpers (tiny primitives)
+// -----------------------------
+function Card({ children, className = '' }: { children: React.ReactNode; className?: string }) {
+  return (
+    <div className={`rounded-xl border border-violet-200 bg-white/90 p-4 shadow-sm ${className}`}>
+      {children}
+    </div>
+  );
+}
+
+function SectionTitle({ children, className = '' }: { children: React.ReactNode; className?: string }) {
+  return <h3 className={`text-sm font-semibold text-violet-700 ${className}`}>{children}</h3>;
+}
+
+function Button({
+  children,
+  onClick,
+  variant = 'primary',
+  disabled,
+  className = '',
+  type = 'button',
+  ariaBusy,
+}: {
+  children: React.ReactNode;
+  onClick?: () => void;
+  variant?: 'primary' | 'danger' | 'outline' | 'ghost';
+  disabled?: boolean;
+  className?: string;
+  type?: 'button' | 'submit' | 'reset';
+  ariaBusy?: boolean;
+}) {
+  const base =
+    'rounded-xl px-4 py-2 text-sm font-medium transition disabled:opacity-60 disabled:cursor-not-allowed focus:outline-none focus:ring-2 focus:ring-violet-400';
+  const variants: Record<string, string> = {
+    primary: 'bg-violet-600 text-white hover:bg-violet-700',
+    danger: 'bg-red-600 text-white hover:bg-red-700',
+    outline: 'border border-violet-300 text-violet-700 hover:bg-violet-50',
+    ghost: 'text-violet-700 hover:bg-violet-100',
+  };
+  return (
+    <button
+      type={type}
+      onClick={onClick}
+      disabled={disabled}
+      aria-busy={ariaBusy}
+      className={`${base} ${variants[variant]} ${className}`}
+    >
+      {children}
+    </button>
+  );
+}
+
+function Label({ children, className = '' }: { children: React.ReactNode; className?: string }) {
+  return <label className={`text-sm ${className}`}>{children}</label>;
+}
+
+function TextArea({
+  value,
+  onChange,
+  rows = 2,
+  placeholder = '',
+  className = '',
+}: {
+  value: string;
+  onChange: (e: React.ChangeEvent<HTMLTextAreaElement>) => void;
+  rows?: number;
+  placeholder?: string;
+  className?: string;
+}) {
+  return (
+    <textarea
+      value={value}
+      onChange={onChange}
+      rows={rows}
+      placeholder={placeholder}
+      className={`w-full rounded-xl border border-violet-200 p-2 text-sm focus:ring-2 focus:ring-violet-400 ${className}`}
+    />
+  );
+}
+
+function Input({
+  type = 'text',
+  value,
+  onChange,
+  placeholder,
+  min,
+  max,
+  className = '',
+}: {
+  type?: string;
+  value: any;
+  onChange: (e: React.ChangeEvent<HTMLInputElement>) => void;
+  placeholder?: string;
+  min?: number;
+  max?: number;
+  className?: string;
+}) {
+  return (
+    <input
+      type={type}
+      value={value}
+      onChange={onChange}
+      placeholder={placeholder}
+      min={min}
+      max={max}
+      className={`w-full rounded-xl border border-violet-200 p-2 text-sm focus:ring-2 focus:ring-violet-400 ${className}`}
+    />
+  );
+}
+
+function StatBadge({ label, value }: { label: string; value: string | number }) {
+  return (
+    <div className="inline-flex items-center gap-2 rounded-full border border-violet-300 bg-violet-50 px-3 py-1 text-xs">
+      <span className="text-violet-600">{label}</span>
+      <strong className="text-violet-800">{value}</strong>
+    </div>
+  );
+}
+
+// -----------------------------
+// Utilities
+// -----------------------------
+const formatClock = (ms: number) => {
+  const s = Math.max(0, Math.floor(ms / 1000));
+  const m = Math.floor(s / 60);
+  const ss = String(s % 60).padStart(2, '0');
+  return `${m}:${ss}`;
+};
+
+const toLocalString = (iso: string) => new Date(iso).toLocaleString();
+
+// -----------------------------
+// Page
+// -----------------------------
 export default function DashboardPage() {
   const router = useRouter();
   const [userId, setUserId] = useState<string | null>(null);
@@ -30,6 +168,8 @@ export default function DashboardPage() {
   // Live/manual timing state
   const [isTiming, setIsTiming] = useState(false);
   const startRef = useRef<number | null>(null);
+  const [elapsed, setElapsed] = useState(0);
+  const tickRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const [intensity, setIntensity] = useState(5);
   const [notes, setNotes] = useState('');
 
@@ -51,13 +191,15 @@ export default function DashboardPage() {
   const [qaError, setQaError] = useState<string | null>(null);
 
   // Past contraction form
-  const [pastStart, setPastStart] = useState<string>('');     // datetime-local
+  const [pastStart, setPastStart] = useState<string>(''); // datetime-local
   const [pastDuration, setPastDuration] = useState<number>(60);
   const [pastIntensity, setPastIntensity] = useState<number | ''>('');
   const [pastNotes, setPastNotes] = useState('');
   const [pastSaving, setPastSaving] = useState(false);
 
+  // ---------------------------------
   // Auth + initial load
+  // ---------------------------------
   useEffect(() => {
     let mounted = true;
     (async () => {
@@ -98,7 +240,22 @@ export default function DashboardPage() {
     };
   }, [router]);
 
+  // ---------------------------------
+  // Manual timer tick
+  // ---------------------------------
+  useEffect(() => {
+    if (!isTiming) return;
+    tickRef.current = setInterval(() => {
+      if (startRef.current) setElapsed(Date.now() - startRef.current);
+    }, 200);
+    return () => {
+      if (tickRef.current) clearInterval(tickRef.current);
+    };
+  }, [isTiming]);
+
+  // ---------------------------------
   // Simulation loop
+  // ---------------------------------
   useEffect(() => {
     if (!simulateOn || !activeSession || !userId) {
       if (simTimerRef.current) {
@@ -138,7 +295,9 @@ export default function DashboardPage() {
     };
   }, [simulateOn, activeSession, userId]);
 
+  // ---------------------------------
   // Stats (local)
+  // ---------------------------------
   const stats = useMemo(() => {
     const now = Date.now();
     const within = (mins: number) =>
@@ -169,7 +328,9 @@ export default function DashboardPage() {
     };
   }, [recent]);
 
-  // Helpers — sessions
+  // ---------------------------------
+  // Session helpers
+  // ---------------------------------
   const startSession = async () => {
     if (!userId) return;
     const { data, error } = await supabase
@@ -190,6 +351,9 @@ export default function DashboardPage() {
     if (error) return alert(error.message);
     setSimulateOn(false);
     setActiveSession(null);
+    setIsTiming(false);
+    startRef.current = null;
+    setElapsed(0);
   };
 
   const handleManualToggle = async () => {
@@ -199,12 +363,14 @@ export default function DashboardPage() {
     }
     if (!isTiming) {
       startRef.current = Date.now();
+      setElapsed(0);
       setIsTiming(true);
     } else {
       const startedAt = new Date(startRef.current!);
       const durationSec = Math.max(1, Math.round((Date.now() - startRef.current!) / 1000));
       setIsTiming(false);
       startRef.current = null;
+      setElapsed(0);
 
       const { data, error } = await supabase
         .from('contractions')
@@ -228,12 +394,13 @@ export default function DashboardPage() {
     }
   };
 
-  // Helpers — device connect (stub for future BLE/Wi-Fi)
   const connectDevice = async () => {
     alert('Device connection coming soon. For now, use the simulated device toggle to demo.');
   };
 
-  // Helpers — past contraction insert
+  // ---------------------------------
+  // Past contraction insert
+  // ---------------------------------
   const savePastContraction = async () => {
     if (!userId) return alert('Please log in again.');
     if (!pastStart) return alert('Please choose a start date & time.');
@@ -268,7 +435,9 @@ export default function DashboardPage() {
     }
   };
 
-  // Helpers — AI summary
+  // ---------------------------------
+  // AI summary
+  // ---------------------------------
   const summarizeDay = async () => {
     setAiError(null);
     setAiLoading(true);
@@ -289,7 +458,9 @@ export default function DashboardPage() {
     }
   };
 
-  // Helpers — Q&A
+  // ---------------------------------
+  // Q&A
+  // ---------------------------------
   const askQuestion = async () => {
     const q = qaInput.trim();
     if (!q) return;
@@ -312,226 +483,247 @@ export default function DashboardPage() {
     }
   };
 
-  if (loading) return <p>Loading…</p>;
+  // ---------------------------------
+  // Skeleton
+  // ---------------------------------
+  if (loading) {
+    return (
+      <div className="min-h-screen bg-violet-50 p-6 space-y-6">
+        <div className="h-7 w-40 rounded bg-violet-200 animate-pulse" />
+        {[...Array(4)].map((_, i) => (
+          <div key={i} className="rounded-xl border border-violet-200 bg-white/90 p-4 shadow-sm">
+            <div className="h-5 w-48 rounded bg-violet-100 animate-pulse" />
+            <div className="mt-3 h-10 w-full rounded bg-violet-50 animate-pulse" />
+          </div>
+        ))}
+      </div>
+    );
+  }
 
+  // ---------------------------------
+  // Render
+  // ---------------------------------
   return (
-    <div className="space-y-6">
-      <h2 className="text-2xl font-semibold">Dashboard</h2>
+    <div className="min-h-screen bg-violet-50 p-6 space-y-6">
+      {/* Header */}
+      <div className="rounded-xl bg-gradient-to-r from-violet-300 via-violet-200 to-violet-100 p-6 shadow">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <h2 className="text-2xl font-bold text-violet-900">Dashboard</h2>
+            <p className="text-sm text-violet-800/80">Track, log, and review your contractions</p>
+          </div>
+
+          <div className="flex items-center gap-3">
+            {/* Session status pill */}
+            {activeSession ? (
+              <span className="inline-flex items-center gap-2 rounded-full bg-violet-600 px-3 py-1 text-xs font-medium text-white shadow-sm">
+                ● Session Active
+              </span>
+            ) : (
+              <span className="inline-flex items-center gap-2 rounded-full bg-gray-200 px-3 py-1 text-xs font-medium text-gray-700">
+                ○ No Active Session
+              </span>
+            )}
+
+            {/* Stats badges */}
+            <div className="flex items-center gap-2">
+              <StatBadge label="Last 10 min" value={stats.last10Count} />
+              <StatBadge label="Last 24h" value={stats.last24Count} />
+              {stats.medianIntervalSec !== null && (
+                <StatBadge label="Median interval" value={`${Math.round(stats.medianIntervalSec / 60)} min`} />
+              )}
+              {stats.medianDurationSec !== null && (
+                <StatBadge label="Median duration" value={`${stats.medianDurationSec} s`} />
+              )}
+            </div>
+          </div>
+        </div>
+      </div>
 
       {/* Start a session (live tracking) */}
-      <div className="rounded-xl border bg-white p-4 space-y-3">
-        <h3 className="font-medium">Start a session (live tracking)</h3>
+      <Card className="space-y-3">
+        <SectionTitle>Start a session (live tracking)</SectionTitle>
 
         <div className="flex flex-wrap items-center gap-3">
           {!activeSession ? (
-            <button onClick={startSession} className="rounded-xl bg-black px-4 py-2 text-white">
-              Start Session
-            </button>
+            <Button onClick={startSession}>Start Session</Button>
           ) : (
-            <button onClick={stopSession} className="rounded-xl bg-red-600 px-4 py-2 text-white">
+            <Button onClick={stopSession} variant="danger">
               Stop Session
-            </button>
+            </Button>
           )}
 
-          <button onClick={connectDevice} className="rounded-xl border px-4 py-2">
+          <Button onClick={connectDevice} variant="outline">
             Connect device
-          </button>
+          </Button>
 
-          <label className="text-sm flex items-center gap-2">
+          <Label className="flex items-center gap-2">
             <input
               type="checkbox"
               checked={simulateOn}
               onChange={(e) => setSimulateOn(e.target.checked)}
               disabled={!activeSession}
+              aria-label="Toggle simulated device"
+              className="accent-violet-600"
             />
-            Simulated device
-          </label>
+            <span className="text-violet-800">Simulated device</span>
+          </Label>
         </div>
 
         {/* Live manual timing */}
         <div className="space-y-2">
-          <p className="text-sm text-gray-700">Time a contraction in real time:</p>
-          <div className="flex items-center gap-3">
-            <button
-              onClick={handleManualToggle}
-              disabled={!activeSession}
-              className="rounded-xl bg-black px-4 py-2 text-white disabled:opacity-60"
-            >
+          <p className="text-sm text-violet-900/80">Time a contraction in real time:</p>
+          <div className="flex flex-wrap items-center gap-3">
+            <Button onClick={handleManualToggle} disabled={!activeSession} ariaBusy={isTiming}>
               {isTiming ? 'Stop & Save' : 'Start'}
-            </button>
+            </Button>
 
-            <label className="text-sm">
-              Intensity: {intensity}
+            {isTiming && (
+              <span className="font-mono text-sm tabular-nums text-violet-900" aria-live="polite">
+                {formatClock(elapsed)}
+              </span>
+            )}
+
+            <Label className="flex items-center gap-2">
+              <span className="text-violet-900/80">Intensity: {intensity}</span>
               <input
                 type="range"
                 min={1}
                 max={10}
                 value={intensity}
                 onChange={(e) => setIntensity(Number(e.target.value))}
-                className="ml-2 align-middle"
+                className="align-middle accent-violet-600"
+                aria-label="Intensity"
               />
-            </label>
+            </Label>
           </div>
 
-          <textarea
-            className="w-full rounded-xl border p-2 text-sm"
-            placeholder="Notes (optional)"
-            value={notes}
-            onChange={(e) => setNotes(e.target.value)}
-            rows={2}
-          />
+          <TextArea placeholder="Notes (optional)" value={notes} onChange={(e) => setNotes(e.target.value)} />
         </div>
-      </div>
+      </Card>
 
       {/* Log a past contraction */}
-      <div className="rounded-xl border bg-white p-4 space-y-3">
-        <h3 className="font-medium">Log a past contraction (missed earlier)</h3>
+      <Card className="space-y-3">
+        <SectionTitle>Log a past contraction (missed earlier)</SectionTitle>
 
         <div className="grid gap-3 md:grid-cols-2">
-          <label className="text-sm">
-            Start date &amp; time
-            <input
+          <Label>
+            <span className="text-violet-900/80">Start date &amp; time</span>
+            <Input
               type="datetime-local"
               value={pastStart}
               onChange={(e) => setPastStart(e.target.value)}
-              className="mt-1 w-full rounded-xl border p-2 text-sm"
+              className="mt-1"
             />
-          </label>
+          </Label>
 
-          <label className="text-sm">
-            Duration (seconds)
-            <input
+          <Label>
+            <span className="text-violet-900/80">Duration (seconds)</span>
+            <Input
               type="number"
               min={1}
               value={pastDuration}
               onChange={(e) => setPastDuration(Number(e.target.value))}
-              className="mt-1 w-full rounded-xl border p-2 text-sm"
+              className="mt-1"
               placeholder="e.g., 60"
             />
-          </label>
+          </Label>
 
-          <label className="text-sm">
-            Intensity (1–10, optional)
-            <input
+          <Label>
+            <span className="text-violet-900/80">Intensity (1–10, optional)</span>
+            <Input
               type="number"
               min={1}
               max={10}
               value={pastIntensity}
               onChange={(e) => setPastIntensity(e.target.value === '' ? '' : Number(e.target.value))}
-              className="mt-1 w-full rounded-xl border p-2 text-sm"
+              className="mt-1"
               placeholder="e.g., 5"
             />
-          </label>
+          </Label>
 
-          <label className="text-sm md:col-span-2">
-            Notes (optional)
-            <textarea
-              className="mt-1 w-full rounded-xl border p-2 text-sm"
-              rows={2}
-              value={pastNotes}
-              onChange={(e) => setPastNotes(e.target.value)}
-            />
-          </label>
+          <Label className="md:col-span-2">
+            <span className="text-violet-900/80">Notes (optional)</span>
+            <TextArea value={pastNotes} onChange={(e) => setPastNotes(e.target.value)} rows={2} className="mt-1" />
+          </Label>
         </div>
 
-        <button
-          onClick={savePastContraction}
-          disabled={pastSaving || !pastStart || !pastDuration}
-          className="rounded-xl bg-black px-4 py-2 text-white disabled:opacity-60"
-        >
+        <Button onClick={savePastContraction} disabled={pastSaving || !pastStart || !pastDuration} ariaBusy={pastSaving}>
           {pastSaving ? 'Saving…' : 'Save past contraction'}
-        </button>
+        </Button>
 
-        <p className="mt-2 text-xs text-gray-500">
+        <p className="mt-2 text-xs text-violet-900/60">
           You can add events you forgot to log earlier. Times are stored in UTC for consistency.
         </p>
-      </div>
+      </Card>
 
       {/* Insights + summary */}
-      <div className="rounded-xl border bg-white p-4">
-        <h3 className="font-medium mb-2">Insights (local)</h3>
-        <p className="text-sm text-gray-700">
-          Last 10 min: <strong>{stats.last10Count}</strong> · Last 24h:{' '}
-          <strong>{stats.last24Count}</strong>
+      <Card>
+        <SectionTitle className="mb-2">Insights (local)</SectionTitle>
+        <p className="text-sm text-violet-900/80">
+          Last 10 min: <strong className="text-violet-900">{stats.last10Count}</strong> · Last 24h:{' '}
+          <strong className="text-violet-900">{stats.last24Count}</strong>
           {stats.medianIntervalSec !== null && (
-            <> · Median interval: <strong>{Math.round(stats.medianIntervalSec / 60)} min</strong></>
+            <> · Median interval: <strong className="text-violet-900">{Math.round(stats.medianIntervalSec / 60)} min</strong></>
           )}
           {stats.medianDurationSec !== null && (
-            <> · Median duration: <strong>{stats.medianDurationSec} s</strong></>
+            <> · Median duration: <strong className="text-violet-900">{stats.medianDurationSec} s</strong></>
           )}
         </p>
 
-        <button
-          onClick={summarizeDay}
-          disabled={aiLoading}
-          className="mt-3 rounded-xl bg-black px-4 py-2 text-white disabled:opacity-60"
-        >
+        <Button onClick={summarizeDay} disabled={aiLoading} ariaBusy={aiLoading} className="mt-3">
           {aiLoading ? 'Summarizing…' : 'Summarize my day'}
-        </button>
+        </Button>
 
         {aiError && <p className="mt-2 text-sm text-red-600">{aiError}</p>}
-        {summary && (
-          <p className="mt-3 text-sm leading-6">
-            {summary}
-          </p>
-        )}
+        {summary && <p className="mt-3 text-sm leading-6 text-violet-900">{summary}</p>}
 
-        <p className="mt-2 text-xs text-gray-500">
+        <p className="mt-2 text-xs text-violet-900/60">
           Educational only; not a medical device. If you’re concerned, contact your clinician or go to L&amp;D.
         </p>
-      </div>
+      </Card>
 
       {/* Q&A */}
-      <div className="rounded-xl border bg-white p-4">
-        <h3 className="font-medium mb-2">Ask a question</h3>
+      <Card>
+        <SectionTitle className="mb-2">Ask a question</SectionTitle>
         <div className="flex gap-2">
           <input
             value={qaInput}
             onChange={(e) => setQaInput(e.target.value)}
             placeholder="Ask a non-diagnostic pregnancy question…"
-            className="flex-1 rounded-xl border p-3 text-sm"
+            className="flex-1 rounded-xl border border-violet-200 p-3 text-sm focus:ring-2 focus:ring-violet-400"
+            aria-label="Ask a question"
           />
-          <button
-            onClick={askQuestion}
-            disabled={qaLoading || !qaInput.trim()}
-            className="rounded-xl bg-black px-4 py-2 text-white disabled:opacity-60"
-          >
+          <Button onClick={askQuestion} disabled={qaLoading || !qaInput.trim()} ariaBusy={qaLoading}>
             {qaLoading ? 'Thinking…' : 'Ask'}
-          </button>
+          </Button>
         </div>
 
         {qaError && <p className="mt-2 text-sm text-red-600">{qaError}</p>}
-        {qaAnswer && (
-          <div className="mt-3 text-sm leading-6 whitespace-pre-wrap">
-            {qaAnswer}
-          </div>
-        )}
+        {qaAnswer && <div className="mt-3 text-sm leading-6 whitespace-pre-wrap text-violet-900">{qaAnswer}</div>}
 
-        <p className="mt-2 text-xs text-gray-500">
+        <p className="mt-2 text-xs text-violet-900/60">
           Educational only; not a medical device. If you’re concerned, contact your clinician or go to L&amp;D.
         </p>
-      </div>
+      </Card>
 
       {/* Recent list */}
-      <div className="rounded-xl border bg-white p-4">
-        <h3 className="font-medium mb-2">Recent (24h)</h3>
+      <Card>
+        <SectionTitle className="mb-2">Recent (24h)</SectionTitle>
         {!recent.length ? (
-          <p className="text-sm text-gray-600">No contractions yet.</p>
+          <p className="text-sm text-violet-900/70">No contractions yet.</p>
         ) : (
           <ul className="space-y-2">
             {recent.map((c) => (
-              <li key={c.id} className="text-sm">
-                <span className="font-mono">
-                  {new Date(c.started_at).toLocaleString()}
-                </span>{' '}
-                — {c.duration_seconds}s
+              <li key={c.id} className="text-sm text-violet-900">
+                <span className="font-mono tabular-nums">{toLocalString(c.started_at)}</span> — {c.duration_seconds}s
                 {c.intensity ? ` · intensity ${c.intensity}` : ''} · {c.source}
                 {c.notes ? ` · ${c.notes}` : ''}
               </li>
             ))}
           </ul>
         )}
-      </div>
+      </Card>
     </div>
   );
 }
