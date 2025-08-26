@@ -40,10 +40,16 @@ export default function DashboardPage() {
   const rand = (min: number, max: number) =>
     Math.floor(Math.random() * (max - min + 1)) + min;
 
+  // AI summary state
   const [summary, setSummary] = useState<string | null>(null);
   const [aiLoading, setAiLoading] = useState(false);
   const [aiError, setAiError] = useState<string | null>(null);
 
+  // Q&A state
+  const [qaInput, setQaInput] = useState('');
+  const [qaAnswer, setQaAnswer] = useState<string | null>(null);
+  const [qaLoading, setQaLoading] = useState(false);
+  const [qaError, setQaError] = useState<string | null>(null);
 
   // auth + load initial data
   useEffect(() => {
@@ -124,8 +130,8 @@ export default function DashboardPage() {
       }
     };
 
-    insertOne(); // fire one immediately
-    simTimerRef.current = setInterval(insertOne, 60_000); // every 60s
+    insertOne();
+    simTimerRef.current = setInterval(insertOne, 60_000);
 
     return () => {
       if (simTimerRef.current) {
@@ -165,7 +171,7 @@ export default function DashboardPage() {
     };
   }, [recent]);
 
-  // start session
+  // helpers
   const startSession = async () => {
     if (!userId) return;
     const { data, error } = await supabase
@@ -180,7 +186,6 @@ export default function DashboardPage() {
     setActiveSession(data);
   };
 
-  // stop session
   const stopSession = async () => {
     if (!activeSession) return;
     const { error } = await supabase
@@ -191,11 +196,10 @@ export default function DashboardPage() {
       alert(error.message);
       return;
     }
-    setSimulateOn(false); // stop simulation if active
+    setSimulateOn(false);
     setActiveSession(null);
   };
 
-  // manual contraction
   const handleManualToggle = async () => {
     if (!userId || !activeSession) {
       alert('Start a session first.');
@@ -234,28 +238,48 @@ export default function DashboardPage() {
   };
 
   const summarizeDay = async () => {
-  setAiError(null);
-  setAiLoading(true);
-  setSummary(null);
-  try {
-    const res = await fetch('/api/ai-summary', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ stats })
-    });
-    const data = await res.json();
-    if (res.ok) {
-      setSummary(data.summary);
-    } else {
-      setAiError(data.error || 'Failed to summarize.');
+    setAiError(null);
+    setAiLoading(true);
+    setSummary(null);
+    try {
+      const res = await fetch('/api/ai-summary', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ stats }),
+      });
+      const data = await res.json();
+      if (res.ok) setSummary(data.summary);
+      else setAiError(data.error || 'Failed to summarize.');
+    } catch (e: any) {
+      setAiError(e?.message || 'Network error.');
+    } finally {
+      setAiLoading(false);
     }
-  } catch (e: any) {
-    setAiError(e?.message || 'Network error.');
-  } finally {
-    setAiLoading(false);
-  }
-};
+  };
 
+  const askQuestion = async () => {
+    const q = qaInput.trim();
+    if (!q) return;
+
+    setQaError(null);
+    setQaAnswer(null);
+    setQaLoading(true);
+
+    try {
+      const res = await fetch('/api/qa', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ question: q }),
+      });
+      const data = await res.json();
+      if (res.ok) setQaAnswer(data.answer);
+      else setQaError(data.error || 'Failed to get an answer.');
+    } catch (e: any) {
+      setQaError(e?.message || 'Network error.');
+    } finally {
+      setQaLoading(false);
+    }
+  };
 
   if (loading) return <p>Loading…</p>;
 
@@ -328,7 +352,7 @@ export default function DashboardPage() {
         />
       </div>
 
-      {/* Stats */}
+      {/* Stats + Summary */}
       <div className="rounded-xl border bg-white p-4">
         <h3 className="font-medium mb-2">Insights (local)</h3>
         <p className="text-sm text-gray-700">
@@ -341,6 +365,7 @@ export default function DashboardPage() {
             <> · Median duration: <strong>{stats.medianDurationSec} s</strong></>
           )}
         </p>
+
         <button
           onClick={summarizeDay}
           disabled={aiLoading}
@@ -355,7 +380,38 @@ export default function DashboardPage() {
             {summary}
           </p>
         )}
-         
+
+        <p className="mt-2 text-xs text-gray-500">
+          Educational only; not a medical device. If you’re concerned, contact your clinician or go to L&amp;D.
+        </p>
+      </div>
+
+      {/* Q&A */}
+      <div className="rounded-xl border bg-white p-4">
+        <h3 className="font-medium mb-2">Ask a question</h3>
+        <div className="flex gap-2">
+          <input
+            value={qaInput}
+            onChange={(e) => setQaInput(e.target.value)}
+            placeholder="Ask a non-diagnostic pregnancy question…"
+            className="flex-1 rounded-xl border p-3 text-sm"
+          />
+          <button
+            onClick={askQuestion}
+            disabled={qaLoading || !qaInput.trim()}
+            className="rounded-xl bg-black px-4 py-2 text-white disabled:opacity-60"
+          >
+            {qaLoading ? 'Thinking…' : 'Ask'}
+          </button>
+        </div>
+
+        {qaError && <p className="mt-2 text-sm text-red-600">{qaError}</p>}
+        {qaAnswer && (
+          <div className="mt-3 text-sm leading-6 whitespace-pre-wrap">
+            {qaAnswer}
+          </div>
+        )}
+
         <p className="mt-2 text-xs text-gray-500">
           Educational only; not a medical device. If you’re concerned, contact your clinician or go to L&amp;D.
         </p>
