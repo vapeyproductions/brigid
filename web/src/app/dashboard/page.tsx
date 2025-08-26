@@ -27,16 +27,15 @@ export default function DashboardPage() {
   const [recent, setRecent] = useState<ContractionRow[]>([]);
   const [loading, setLoading] = useState(true);
 
-  // manual contraction state
+  // Live/manual timing state
   const [isTiming, setIsTiming] = useState(false);
   const startRef = useRef<number | null>(null);
   const [intensity, setIntensity] = useState(5);
   const [notes, setNotes] = useState('');
 
-  // simulated device state
+  // Simulated device (demo)
   const [simulateOn, setSimulateOn] = useState(false);
   const simTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
-
   const rand = (min: number, max: number) =>
     Math.floor(Math.random() * (max - min + 1)) + min;
 
@@ -51,7 +50,14 @@ export default function DashboardPage() {
   const [qaLoading, setQaLoading] = useState(false);
   const [qaError, setQaError] = useState<string | null>(null);
 
-  // auth + load initial data
+  // Past contraction form
+  const [pastStart, setPastStart] = useState<string>('');     // datetime-local
+  const [pastDuration, setPastDuration] = useState<number>(60);
+  const [pastIntensity, setPastIntensity] = useState<number | ''>('');
+  const [pastNotes, setPastNotes] = useState('');
+  const [pastSaving, setPastSaving] = useState(false);
+
+  // Auth + initial load
   useEffect(() => {
     let mounted = true;
     (async () => {
@@ -65,7 +71,7 @@ export default function DashboardPage() {
       if (!mounted) return;
       setUserId(uid);
 
-      // active session
+      // Active session
       const { data: act } = await supabase
         .from('sessions')
         .select('id, started_at, ended_at, device_id')
@@ -74,10 +80,9 @@ export default function DashboardPage() {
         .order('started_at', { ascending: false })
         .limit(1)
         .maybeSingle();
-
       setActiveSession(act ?? null);
 
-      // recent contractions (last 24h)
+      // Recent (24h)
       const since = new Date(Date.now() - 24 * 3600 * 1000).toISOString();
       const { data: cons } = await supabase
         .from('contractions')
@@ -85,7 +90,6 @@ export default function DashboardPage() {
         .eq('user_id', uid)
         .gte('started_at', since)
         .order('started_at', { ascending: false });
-
       setRecent(cons ?? []);
       setLoading(false);
     })();
@@ -94,7 +98,7 @@ export default function DashboardPage() {
     };
   }, [router]);
 
-  // simulation effect
+  // Simulation loop
   useEffect(() => {
     if (!simulateOn || !activeSession || !userId) {
       if (simTimerRef.current) {
@@ -103,12 +107,10 @@ export default function DashboardPage() {
       }
       return;
     }
-
     const insertOne = async () => {
       const startedAt = new Date();
       const durationSec = rand(30, 90);
       const intensityVal = rand(3, 8);
-
       const { data, error } = await supabase
         .from('contractions')
         .insert([
@@ -124,15 +126,10 @@ export default function DashboardPage() {
         ])
         .select('id, started_at, duration_seconds, intensity, notes, source')
         .single();
-
-      if (!error && data) {
-        setRecent((prev) => [data as ContractionRow, ...prev]);
-      }
+      if (!error && data) setRecent((prev) => [data as ContractionRow, ...prev]);
     };
-
-    insertOne();
-    simTimerRef.current = setInterval(insertOne, 60_000);
-
+    insertOne(); // fire one immediately
+    simTimerRef.current = setInterval(insertOne, 60_000); // every 60s
     return () => {
       if (simTimerRef.current) {
         clearInterval(simTimerRef.current);
@@ -141,18 +138,19 @@ export default function DashboardPage() {
     };
   }, [simulateOn, activeSession, userId]);
 
-  // stats
+  // Stats (local)
   const stats = useMemo(() => {
     const now = Date.now();
     const within = (mins: number) =>
       recent.filter((c) => now - new Date(c.started_at).getTime() <= mins * 60_000);
-
     const last10 = within(10);
     const last24h = within(24 * 60);
 
-    const intervals = [...recent]
+    const timestamps = [...recent]
       .map((c) => new Date(c.started_at).getTime())
-      .sort((a, b) => a - b)
+      .sort((a, b) => a - b);
+
+    const intervals = timestamps
       .map((t, i, arr) => (i === 0 ? null : (t - arr[i - 1]) / 1000))
       .filter((x): x is number => x !== null);
 
@@ -171,7 +169,7 @@ export default function DashboardPage() {
     };
   }, [recent]);
 
-  // helpers
+  // Helpers — sessions
   const startSession = async () => {
     if (!userId) return;
     const { data, error } = await supabase
@@ -179,10 +177,7 @@ export default function DashboardPage() {
       .insert([{ user_id: userId, device_id: null }])
       .select('id, started_at, ended_at, device_id')
       .single();
-    if (error) {
-      alert(error.message);
-      return;
-    }
+    if (error) return alert(error.message);
     setActiveSession(data);
   };
 
@@ -192,10 +187,7 @@ export default function DashboardPage() {
       .from('sessions')
       .update({ ended_at: new Date().toISOString() })
       .eq('id', activeSession.id);
-    if (error) {
-      alert(error.message);
-      return;
-    }
+    if (error) return alert(error.message);
     setSimulateOn(false);
     setActiveSession(null);
   };
@@ -229,7 +221,6 @@ export default function DashboardPage() {
         ])
         .select('id, started_at, duration_seconds, intensity, notes, source')
         .single();
-
       if (!error && data) {
         setRecent((prev) => [data as ContractionRow, ...prev]);
         setNotes('');
@@ -237,6 +228,47 @@ export default function DashboardPage() {
     }
   };
 
+  // Helpers — device connect (stub for future BLE/Wi-Fi)
+  const connectDevice = async () => {
+    alert('Device connection coming soon. For now, use the simulated device toggle to demo.');
+  };
+
+  // Helpers — past contraction insert
+  const savePastContraction = async () => {
+    if (!userId) return alert('Please log in again.');
+    if (!pastStart) return alert('Please choose a start date & time.');
+    if (!pastDuration || pastDuration <= 0) return alert('Please enter a positive duration (seconds).');
+
+    setPastSaving(true);
+    try {
+      const startedAt = new Date(pastStart);
+      const { data, error } = await supabase
+        .from('contractions')
+        .insert([
+          {
+            user_id: userId,
+            session_id: null, // past entries need not be tied to a live session
+            source: 'manual',
+            started_at: startedAt.toISOString(),
+            duration_seconds: Math.round(pastDuration),
+            intensity: pastIntensity === '' ? null : Number(pastIntensity),
+            notes: pastNotes || null,
+          },
+        ])
+        .select('id, started_at, duration_seconds, intensity, notes, source')
+        .single();
+      if (error) return alert(error.message);
+      setRecent((prev) => [data as ContractionRow, ...prev]);
+      setPastStart('');
+      setPastDuration(60);
+      setPastIntensity('');
+      setPastNotes('');
+    } finally {
+      setPastSaving(false);
+    }
+  };
+
+  // Helpers — AI summary
   const summarizeDay = async () => {
     setAiError(null);
     setAiLoading(true);
@@ -257,14 +289,13 @@ export default function DashboardPage() {
     }
   };
 
+  // Helpers — Q&A
   const askQuestion = async () => {
     const q = qaInput.trim();
     if (!q) return;
-
     setQaError(null);
     setQaAnswer(null);
     setQaLoading(true);
-
     try {
       const res = await fetch('/api/qa', {
         method: 'POST',
@@ -287,72 +318,136 @@ export default function DashboardPage() {
     <div className="space-y-6">
       <h2 className="text-2xl font-semibold">Dashboard</h2>
 
-      {/* Session controls */}
-      <div className="rounded-xl border bg-white p-4">
-        <p className="mb-2 text-sm text-gray-700">
-          Session status: {activeSession ? 'Active' : 'Stopped'}
-        </p>
-        {!activeSession ? (
-          <button
-            onClick={startSession}
-            className="rounded-xl bg-black px-4 py-2 text-white"
-          >
-            Start Session
-          </button>
-        ) : (
-          <button
-            onClick={stopSession}
-            className="rounded-xl bg-red-600 px-4 py-2 text-white"
-          >
-            Stop Session
-          </button>
-        )}
-      </div>
-
-      {/* Manual contraction */}
+      {/* Start a session (live tracking) */}
       <div className="rounded-xl border bg-white p-4 space-y-3">
-        <h3 className="font-medium">Manual Contraction</h3>
-        <div className="flex items-center gap-3">
-          <button
-            onClick={handleManualToggle}
-            className="rounded-xl bg-black px-4 py-2 text-white"
-          >
-            {isTiming ? 'Stop & Save' : 'Start'}
+        <h3 className="font-medium">Start a session (live tracking)</h3>
+
+        <div className="flex flex-wrap items-center gap-3">
+          {!activeSession ? (
+            <button onClick={startSession} className="rounded-xl bg-black px-4 py-2 text-white">
+              Start Session
+            </button>
+          ) : (
+            <button onClick={stopSession} className="rounded-xl bg-red-600 px-4 py-2 text-white">
+              Stop Session
+            </button>
+          )}
+
+          <button onClick={connectDevice} className="rounded-xl border px-4 py-2">
+            Connect device
           </button>
 
-          <label className="text-sm">
-            Intensity: {intensity}
-            <input
-              type="range"
-              min={1}
-              max={10}
-              value={intensity}
-              onChange={(e) => setIntensity(Number(e.target.value))}
-              className="ml-2 align-middle"
-            />
-          </label>
-
-          {/* Simulation toggle */}
-          <label className="text-sm flex items-center gap-2 ml-4">
+          <label className="text-sm flex items-center gap-2">
             <input
               type="checkbox"
               checked={simulateOn}
               onChange={(e) => setSimulateOn(e.target.checked)}
+              disabled={!activeSession}
             />
             Simulated device
           </label>
         </div>
 
-        <textarea
-          className="w-full rounded-xl border p-2 text-sm"
-          placeholder="Notes (optional)"
-          value={notes}
-          onChange={(e) => setNotes(e.target.value)}
-          rows={2}
-        />
+        {/* Live manual timing */}
+        <div className="space-y-2">
+          <p className="text-sm text-gray-700">Time a contraction in real time:</p>
+          <div className="flex items-center gap-3">
+            <button
+              onClick={handleManualToggle}
+              disabled={!activeSession}
+              className="rounded-xl bg-black px-4 py-2 text-white disabled:opacity-60"
+            >
+              {isTiming ? 'Stop & Save' : 'Start'}
+            </button>
+
+            <label className="text-sm">
+              Intensity: {intensity}
+              <input
+                type="range"
+                min={1}
+                max={10}
+                value={intensity}
+                onChange={(e) => setIntensity(Number(e.target.value))}
+                className="ml-2 align-middle"
+              />
+            </label>
+          </div>
+
+          <textarea
+            className="w-full rounded-xl border p-2 text-sm"
+            placeholder="Notes (optional)"
+            value={notes}
+            onChange={(e) => setNotes(e.target.value)}
+            rows={2}
+          />
+        </div>
       </div>
 
-      {/* Stats + Summary */}
+      {/* Log a past contraction */}
+      <div className="rounded-xl border bg-white p-4 space-y-3">
+        <h3 className="font-medium">Log a past contraction (missed earlier)</h3>
+
+        <div className="grid gap-3 md:grid-cols-2">
+          <label className="text-sm">
+            Start date &amp; time
+            <input
+              type="datetime-local"
+              value={pastStart}
+              onChange={(e) => setPastStart(e.target.value)}
+              className="mt-1 w-full rounded-xl border p-2 text-sm"
+            />
+          </label>
+
+          <label className="text-sm">
+            Duration (seconds)
+            <input
+              type="number"
+              min={1}
+              value={pastDuration}
+              onChange={(e) => setPastDuration(Number(e.target.value))}
+              className="mt-1 w-full rounded-xl border p-2 text-sm"
+              placeholder="e.g., 60"
+            />
+          </label>
+
+          <label className="text-sm">
+            Intensity (1–10, optional)
+            <input
+              type="number"
+              min={1}
+              max={10}
+              value={pastIntensity}
+              onChange={(e) => setPastIntensity(e.target.value === '' ? '' : Number(e.target.value))}
+              className="mt-1 w-full rounded-xl border p-2 text-sm"
+              placeholder="e.g., 5"
+            />
+          </label>
+
+          <label className="text-sm md:col-span-2">
+            Notes (optional)
+            <textarea
+              className="mt-1 w-full rounded-xl border p-2 text-sm"
+              rows={2}
+              value={pastNotes}
+              onChange={(e) => setPastNotes(e.target.value)}
+            />
+          </label>
+        </div>
+
+        <button
+          onClick={savePastContraction}
+          disabled={pastSaving || !pastStart || !pastDuration}
+          className="rounded-xl bg-black px-4 py-2 text-white disabled:opacity-60"
+        >
+          {pastSaving ? 'Saving…' : 'Save past contraction'}
+        </button>
+
+        <p className="mt-2 text-xs text-gray-500">
+          You can add events you forgot to log earlier. Times are stored in UTC for consistency.
+        </p>
+      </div>
+
+      {/* Insights + summary */}
       <div className="rounded-xl border bg-white p-4">
         <h3 className="font-medium mb-2">Insights (local)</h3>
         <p className="text-sm text-gray-700">
