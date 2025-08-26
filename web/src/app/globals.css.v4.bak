@@ -1,0 +1,40 @@
+/* app/globals.css  — Tailwind v4 setup */
+
+@import "tailwindcss";
+
+/* Design tokens */
+@theme {
+  /* Fonts (match layout.tsx) */
+  --font-sans: Nunito, ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto,
+    "Helvetica Neue", Arial, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol",
+    sans-serif;
+
+  --font-mono: var(--font-geist-mono), ui-monospace, SFMono-Regular, Menlo, Monaco,
+    Consolas, "Liberation Mono", "Courier New", monospace;
+
+
+/* Base document tweaks */
+html, body {
+  height: 100%;
+}
+
+body {
+ 
+  font-family: var(--font-sans);
+ 
+  background: white;
+}
+
+::selection {
+  background: var(--color-violet-200);
+  color: var(--color-gray-900);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}}
