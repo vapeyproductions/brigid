@@ -30,6 +30,22 @@ type ChatMessage = {
   created_at: string; // ISO
 };
 
+// Saved chat types
+type FolderRow = {
+  id: string;
+  name: string;
+  created_at?: string;
+};
+
+type ThreadRow = {
+  id: string;
+  title: string;
+  folder_id: string | null;
+  started_at: string;
+  updated_at: string;
+  message_count: number;
+};
+
 // -------------------------------------------------
 // Tiny UI primitives
 // -------------------------------------------------
@@ -177,7 +193,6 @@ function ChatBubble({ message }: { message: ChatMessage }) {
   );
 }
 
-// Small sortable TH component
 function Th({ label, active, dir, onClick }: { label: string; active?: boolean; dir?: 'asc' | 'desc'; onClick?: () => void }) {
   return (
     <th
@@ -208,13 +223,10 @@ const toLocalString = (iso: string) => new Date(iso).toLocaleString();
 const csvEscape = (v: unknown): string => {
   if (v == null) return '';
   const s = String(v);
-  // escape double-quotes: " -> ""
   const escaped = s.split('"').join('""');
-  // quote the field if it contains a quote, comma, or newline
   const needsQuotes = s.includes('"') || s.includes(',') || s.includes('\n');
   return needsQuotes ? `"${escaped}"` : escaped;
 };
-
 
 // -------------------------------------------------
 // Page
@@ -244,7 +256,7 @@ export default function DashboardPage() {
   const [aiLoading, setAiLoading] = useState(false);
   const [aiError, setAiError] = useState<string | null>(null);
 
-  // Chat state (Q&A on the right)
+  // Chat state (Q&A)
   const [chat, setChat] = useState<ChatMessage[]>([]);
   const [qaInput, setQaInput] = useState('');
   const [qaLoading, setQaLoading] = useState(false);
@@ -252,7 +264,7 @@ export default function DashboardPage() {
   const chatEndRef = useRef<HTMLDivElement | null>(null);
 
   // Past contraction form
-  const [pastStart, setPastStart] = useState<string>(''); // datetime-local
+  const [pastStart, setPastStart] = useState<string>('');
   const [pastDuration, setPastDuration] = useState<number>(60);
   const [pastIntensity, setPastIntensity] = useState<number | ''>('');
   const [pastNotes, setPastNotes] = useState('');
@@ -276,6 +288,13 @@ export default function DashboardPage() {
   const [allSort, setAllSort] = useState<{ column: 'started_at' | 'duration_seconds' | 'intensity' | 'source'; direction: 'asc' | 'desc' }>(
     { column: 'started_at', direction: 'desc' }
   );
+
+  // Saved chat state
+  const [folders, setFolders] = useState<FolderRow[]>([]);
+  const [threads, setThreads] = useState<ThreadRow[]>([]);
+  const [currentFolderId, setCurrentFolderId] = useState<string | null>(null);
+  const [currentThreadId, setCurrentThreadId] = useState<string | null>(null);
+  const [savedOpen, setSavedOpen] = useState<boolean>(true); // collapsible “Saved chats” above Q+A
 
   // ---------------------------------
   // Auth + initial load
@@ -312,13 +331,28 @@ export default function DashboardPage() {
         .order('started_at', { ascending: false });
       setRecent(cons ?? []);
       setLoading(false);
+
+      // Load chat navigation (folders + threads)
+      const { data: f } = await supabase
+        .from('chat_folders')
+        .select('id,name,created_at')
+        .eq('user_id', uid)
+        .order('created_at', { ascending: true });
+      setFolders(f ?? []);
+
+      const { data: t } = await supabase
+        .from('chat_threads')
+        .select('id,title,folder_id,started_at,updated_at,message_count')
+        .eq('user_id', uid)
+        .order('updated_at', { ascending: false });
+      setThreads(t ?? []);
     })();
     return () => {
       mounted = false;
     };
   }, [router]);
 
-  // Load all contractions with filters/sort (paginated)
+  // Load all contractions (initial + changes)
   const loadAll = async (reset = false) => {
     if (!userId) return;
     setAllLoading(true);
@@ -331,33 +365,15 @@ export default function DashboardPage() {
       .select('id, started_at, duration_seconds, intensity, notes, source')
       .eq('user_id', userId);
 
-    // Filters
-    if (filterStart) {
-      const iso = new Date(filterStart).toISOString();
-      query = query.gte('started_at', iso);
-    }
-    if (filterEnd) {
-      const iso = new Date(filterEnd).toISOString();
-      query = query.lte('started_at', iso);
-    }
-    if (filterSource !== 'all') {
-      query = query.eq('source', filterSource);
-    }
-    if (filterIntensityMin !== '') {
-      query = query.gte('intensity', Number(filterIntensityMin));
-    }
-    if (filterIntensityMax !== '') {
-      query = query.lte('intensity', Number(filterIntensityMax));
-    }
+    if (filterStart) query = query.gte('started_at', new Date(filterStart).toISOString());
+    if (filterEnd) query = query.lte('started_at', new Date(filterEnd).toISOString());
+    if (filterSource !== 'all') query = query.eq('source', filterSource);
+    if (filterIntensityMin !== '') query = query.gte('intensity', Number(filterIntensityMin));
+    if (filterIntensityMax !== '') query = query.lte('intensity', Number(filterIntensityMax));
 
-    // Sorting
-    query = query.order(allSort.column, { ascending: allSort.direction === 'asc' });
-
-    // Pagination
-    query = query.range(from, to);
+    query = query.order(allSort.column, { ascending: allSort.direction === 'asc' }).range(from, to);
 
     const { data, error } = await query;
-
     if (error) {
       setAllError(error.message);
     } else {
@@ -370,11 +386,8 @@ export default function DashboardPage() {
     setAllLoading(false);
   };
 
-  // First load of full log
   useEffect(() => {
-    if (userId) {
-      loadAll(true);
-    }
+    if (userId) loadAll(true);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [userId]);
 
@@ -576,6 +589,38 @@ export default function DashboardPage() {
   };
 
   // ---------------------------------
+  // Saved chat helpers
+  // ---------------------------------
+  const openThread = async (tid: string) => {
+    if (!userId) return;
+    setCurrentThreadId(tid);
+    const { data: msgs, error } = await supabase
+      .from('chat_messages')
+      .select('id, role, content, created_at')
+      .eq('user_id', userId)
+      .eq('thread_id', tid)
+      .order('created_at', { ascending: true });
+    if (!error) {
+      setChat((msgs ?? []) as ChatMessage[]);
+    }
+  };
+
+  const createThread = async (title: string, folderId: string | null) => {
+    if (!userId) return null;
+    const { data: newThread, error } = await supabase
+      .from('chat_threads')
+      .insert([{ user_id: userId, folder_id: folderId, title }])
+      .select('id,title,folder_id,started_at,updated_at,message_count')
+      .single();
+    if (error || !newThread) {
+      alert(error?.message || 'Could not create thread.');
+      return null;
+    }
+    setThreads((prev) => [newThread as ThreadRow, ...prev]);
+    return newThread.id as string;
+  };
+
+  // ---------------------------------
   // AI summary
   // ---------------------------------
   const summarizeDay = async () => {
@@ -599,11 +644,20 @@ export default function DashboardPage() {
   };
 
   // ---------------------------------
-  // Q&A chat (right pane)
+  // Q&A chat (persisted)
   // ---------------------------------
   const askQuestion = async () => {
     const q = qaInput.trim();
-    if (!q) return;
+    if (!q || !userId) return;
+
+    let threadId = currentThreadId;
+    if (!threadId) {
+      const title = q.length > 80 ? q.slice(0, 77) + '…' : (q.split(/\s+/).slice(0, 8).join(' ') || 'New conversation');
+      threadId = await createThread(title, currentFolderId);
+      if (!threadId) return;
+      setCurrentThreadId(threadId);
+      setChat([]); // fresh visual thread
+    }
 
     const userMsg: ChatMessage = {
       id: 'u_' + Date.now(),
@@ -616,15 +670,30 @@ export default function DashboardPage() {
     setQaError(null);
     setQaLoading(true);
 
+    await supabase.from('chat_messages').insert([{
+      thread_id: threadId,
+      user_id: userId,
+      role: 'user',
+      content: q
+    }]);
+
     try {
       const res = await fetch('/api/qa', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ question: q, history: chat }),
+        body: JSON.stringify({ question: q, history: chat, threadId }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Failed to get an answer.');
       const answer = typeof data.answer === 'string' ? data.answer : JSON.stringify(data);
+
+      await supabase.from('chat_messages').insert([{
+        thread_id: threadId,
+        user_id: userId,
+        role: 'assistant',
+        content: answer
+      }]);
+
       const assistantMsg: ChatMessage = {
         id: 'a_' + Date.now(),
         role: 'assistant',
@@ -632,6 +701,19 @@ export default function DashboardPage() {
         created_at: new Date().toISOString(),
       };
       setChat((prev) => [...prev, assistantMsg]);
+
+      setThreads((prev) => {
+        const idx = prev.findIndex((t) => t.id === threadId);
+        if (idx < 0) return prev;
+        const copy = [...prev];
+        const updated: ThreadRow = {
+          ...copy[idx],
+          updated_at: new Date().toISOString(),
+          message_count: (copy[idx].message_count ?? 0) + 2,
+        };
+        copy.splice(idx, 1);
+        return [updated, ...copy];
+      });
     } catch (e: any) {
       setQaError(e?.message || 'Network error.');
     } finally {
@@ -661,7 +743,6 @@ export default function DashboardPage() {
       direction: allSort.column === column && allSort.direction === 'desc' ? 'asc' : 'desc',
     } as typeof allSort;
     setAllSort(next);
-    // reload with new sort
     loadAll(true);
   };
 
@@ -669,25 +750,24 @@ export default function DashboardPage() {
     const header = ['id', 'started_at', 'duration_seconds', 'intensity', 'source', 'notes'];
     const rows = allCons.map((c) => [
       c.id,
-    new Date(c.started_at).toISOString(),
-    c.duration_seconds,
-    c.intensity == null ? '' : c.intensity,
-    c.source,
-    c.notes == null ? '' : c.notes,
-  ]);
-  const csv = [header.join(','), ...rows.map((r) => r.map(csvEscape).join(','))].join('\n');
-  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.setAttribute('download', 'contractions.csv');
-  a.style.display = 'none';
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-  URL.revokeObjectURL(url);
-};
-
+      new Date(c.started_at).toISOString(),
+      c.duration_seconds,
+      c.intensity == null ? '' : c.intensity,
+      c.source,
+      c.notes == null ? '' : c.notes,
+    ]);
+    const csv = [header.join(','), ...rows.map((r) => r.map(csvEscape).join(','))].join('\n');
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.setAttribute('download', 'contractions.csv');
+    a.style.display = 'none';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
 
   const clearFilters = () => {
     setFilterStart('');
@@ -720,9 +800,9 @@ export default function DashboardPage() {
     );
   }
 
-  // ---------------------------------
-  // Render (Three rows: controls/chat, insights+recent, full log)
-  // ---------------------------------
+  // -------------------------------------------------
+  // Render
+  // -------------------------------------------------
   return (
     <div className="min-h-screen bg-violet-50 p-6 space-y-6 max-w-screen-2xl mx-auto">
       {/* Header */}
@@ -734,7 +814,6 @@ export default function DashboardPage() {
           </div>
 
           <div className="flex items-center gap-3">
-            {/* Session status pill */}
             {activeSession ? (
               <span className="inline-flex items-center gap-2 rounded-full bg-violet-600 px-3 py-1 text-xs font-medium text-white shadow-sm">
                 ● Session Active
@@ -745,7 +824,6 @@ export default function DashboardPage() {
               </span>
             )}
 
-            {/* Stats badges */}
             <div className="flex items-center gap-2">
               <StatBadge label="Last 10 min" value={stats.last10Count} />
               <StatBadge label="Last 24h" value={stats.last24Count} />
@@ -760,11 +838,11 @@ export default function DashboardPage() {
         </div>
       </div>
 
-      {/* Row 1: Controls (L) + Chat (R) */}
+      {/* Row 1: Controls (L) + Right column (Saved + Chat) */}
       <div className="grid grid-cols-1 gap-6 md:grid-cols-12">
-        {/* Left: start/log */}
+        {/* Left controls */}
         <div className="space-y-6 md:col-span-4">
-          {/* Start a session (live tracking) */}
+          {/* Start a session */}
           <Card className="space-y-3">
             <SectionTitle>Start a session (live tracking)</SectionTitle>
 
@@ -877,15 +955,171 @@ export default function DashboardPage() {
           </Card>
         </div>
 
-        {/* Right: Chat-like Q&A */}
-        <div className="md:col-span-8">
+        {/* Right: Saved chats (top) + Chat (bottom) */}
+        <div className="space-y-6 md:col-span-8">
+          {/* Saved chats panel (compact + collapsible) */}
+          <Card>
+            <div className="mb-3 flex items-center justify-between">
+              <SectionTitle>Saved chats</SectionTitle>
+              <div className="flex items-center gap-2">
+                <Button variant="outline" onClick={() => setSavedOpen((v) => !v)}>
+                  {savedOpen ? 'Hide' : 'Show'}
+                </Button>
+                <Button
+                  variant="outline"
+                  onClick={async () => {
+                    if (!userId) return;
+                    const name = prompt('Folder name');
+                    if (!name) return;
+                    const { data, error } = await supabase
+                      .from('chat_folders')
+                      .insert([{ user_id: userId, name }])
+                      .select('id,name,created_at')
+                      .single();
+                    if (!error && data) setFolders((p) => [...p, data as FolderRow]);
+                  }}
+                >
+                  + Folder
+                </Button>
+                <Button
+                  onClick={async () => {
+                    const title = 'New conversation';
+                    const tid = await createThread(title, currentFolderId);
+                    if (tid) {
+                      setCurrentThreadId(tid);
+                      setChat([]);
+                    }
+                  }}
+                >
+                  + New chat
+                </Button>
+              </div>
+            </div>
+
+            {savedOpen && (
+              <div className="space-y-3">
+                {/* Filter row */}
+                <div className="flex flex-wrap items-center gap-2">
+                  <Label className="flex items-center gap-2">
+                    <span className="text-violet-900/80">Folder</span>
+                    <select
+                      value={currentFolderId ?? ''}
+                      onChange={(e) => setCurrentFolderId(e.target.value || null)}
+                      className="w-48 rounded-xl border border-violet-200 p-2 text-sm focus:ring-2 focus:ring-violet-400"
+                    >
+                      <option value="">All</option>
+                      {folders.map((f) => (
+                        <option key={f.id} value={f.id}>
+                          {f.name}
+                        </option>
+                      ))}
+                    </select>
+                  </Label>
+
+                  {currentThreadId && (
+                    <>
+                      <Button
+                        variant="outline"
+                        onClick={async () => {
+                          const newTitle = prompt('Thread title');
+                          if (!newTitle) return;
+                          await supabase.from('chat_threads').update({ title: newTitle }).eq('id', currentThreadId);
+                          setThreads((prev) => prev.map((t) => (t.id === currentThreadId ? { ...t, title: newTitle } : t)));
+                        }}
+                      >
+                        Rename thread
+                      </Button>
+
+                      <Button
+                        variant="outline"
+                        onClick={async () => {
+                          if (folders.length === 0) {
+                            alert('No folders yet. Create one first.');
+                            return;
+                          }
+                          const choice = prompt(
+                            'Move to folder (exact name). Leave blank for Unfiled:\n' + folders.map((x) => `• ${x.name}`).join('\n')
+                          );
+                          if (choice === null) return;
+                          const dest = folders.find((x) => x.name === choice);
+                          await supabase.from('chat_threads').update({ folder_id: dest?.id ?? null }).eq('id', currentThreadId);
+                          setThreads((prev) =>
+                            prev.map((t) => (t.id === currentThreadId ? { ...t, folder_id: dest?.id ?? null } : t))
+                          );
+                        }}
+                      >
+                        Move thread
+                      </Button>
+
+                      <Button
+                        variant="danger"
+                        onClick={async () => {
+                          if (!confirm('Delete this thread?')) return;
+                          await supabase.from('chat_threads').delete().eq('id', currentThreadId);
+                          setThreads((prev) => prev.filter((t) => t.id !== currentThreadId));
+                          setCurrentThreadId(null);
+                          setChat([]);
+                        }}
+                      >
+                        Delete thread
+                      </Button>
+                    </>
+                  )}
+                </div>
+
+                {/* Threads list (compact, scrollable) */}
+                <div className="max-h-56 overflow-y-auto rounded-md border border-violet-100 bg-white/70">
+                  <table className="w-full text-left text-sm">
+                    <thead className="sticky top-0 bg-white text-violet-800">
+                      <tr>
+                        <th className="px-3 py-2">Title</th>
+                        <th className="px-3 py-2">Date</th>
+                        <th className="px-3 py-2">Msgs</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-violet-100">
+                      {threads
+                        .filter((t) => (currentFolderId ? t.folder_id === currentFolderId : true))
+                        .map((t) => (
+                          <tr
+                            key={t.id}
+                            className={`hover:bg-violet-50/60 ${currentThreadId === t.id ? 'bg-violet-50' : ''} cursor-pointer`}
+                            onClick={() => openThread(t.id)}
+                          >
+                            <td className="px-3 py-2">
+                              <div className="truncate">{t.title}</div>
+                            </td>
+                            <td className="px-3 py-2 text-xs text-violet-700/80">
+                              {new Date(t.started_at).toLocaleDateString()}
+                            </td>
+                            <td className="px-3 py-2">{t.message_count}</td>
+                          </tr>
+                        ))}
+                      {threads.filter((t) => (currentFolderId ? t.folder_id === currentFolderId : true)).length === 0 && (
+                        <tr>
+                          <td className="px-3 py-3 text-violet-700" colSpan={3}>
+                            No threads yet.
+                          </td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
+          </Card>
+
+          {/* Chat box */}
           <Card className="flex min-h-[60vh] flex-col md:h-[calc(100vh-240px)]">
             <div className="mb-2 flex items-center justify-between">
-              <SectionTitle>Ask a question</SectionTitle>
+              <SectionTitle>
+                Ask a question {currentThreadId ? <span className="text-violet-500">• saved</span> : <span className="text-violet-400">• unsaved</span>}
+              </SectionTitle>
               {chat.length > 0 ? (
                 <button
                   onClick={() => setChat([])}
                   className="text-xs text-violet-700 underline underline-offset-2 hover:text-violet-900"
+                  title="Clears visible messages (does not delete saved history)"
                 >
                   Clear
                 </button>
@@ -945,14 +1179,14 @@ export default function DashboardPage() {
         </div>
       </div>
 
-      {/* Row 2: Insights (L) + Recent 24h horizontal (R) */}
+      {/* Row 2: Insights (L) + Recent 24h (R) */}
       <div className="grid grid-cols-1 gap-6 md:grid-cols-12">
-        {/* Insights */}
         <div className="md:col-span-4">
           <Card>
             <SectionTitle className="mb-2">Insights (local)</SectionTitle>
             <p className="text-sm text-violet-900/80">
-              Last 10 min: <strong className="text-violet-900">{stats.last10Count}</strong> · Last 24h: <strong className="text-violet-900">{stats.last24Count}</strong>
+              Last 10 min: <strong className="text-violet-900">{stats.last10Count}</strong> · Last 24h:{' '}
+              <strong className="text-violet-900">{stats.last24Count}</strong>
               {stats.medianIntervalSec !== null ? (
                 <span> · Median interval: <strong className="text-violet-900">{Math.round(stats.medianIntervalSec / 60)} min</strong></span>
               ) : null}
@@ -974,7 +1208,6 @@ export default function DashboardPage() {
           </Card>
         </div>
 
-        {/* Recent (24h) horizontal */}
         <div className="md:col-span-8">
           <Card>
             <div className="mb-2 flex items-center justify-between">
@@ -1002,7 +1235,7 @@ export default function DashboardPage() {
         </div>
       </div>
 
-      {/* Row 3: Full-width data log (all contractions) */}
+      {/* Row 3: Full-width data log */}
       <div className="grid grid-cols-1">
         <Card>
           <div className="mb-3 flex flex-wrap items-end justify-between gap-3">

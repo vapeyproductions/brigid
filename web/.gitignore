@@ -39,3 +39,25 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+.env.local
+
+grep -qxF 'ai/out/' .gitignore || echo 'ai/out/' >> .gitignore
+grep -qxF '*.gguf' .gitignore   || echo '*.gguf' >> .gitignore
+grep -qxF '*.safetensors' .gitignore || echo '*.safetensors' >> .gitignore
+
+# Python venv & caches
+.venv/
+__pycache__/
+*.pyc
+
+# Node.js
+node_modules/
+
+# Training outputs / weights
+ai/out/
+*.safetensors
+*.gguf
+
+# MacOS junk
+.DS_Store

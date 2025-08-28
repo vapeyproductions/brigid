@@ -1,0 +1,7 @@
+transformers==4.42.4
+accelerate>=0.31.0
+datasets>=2.20.0
+peft>=0.11.1
+trl>=0.9.6
+sentencepiece>=0.2.0
+protobuf

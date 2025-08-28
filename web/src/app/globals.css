@@ -3,4 +3,4 @@
 @tailwind utilities;
 
 /* optional */
-::selection { background: #ede9fe; color: #111827; } /* violet-100 / gray-900 */
+::selection { background: #ede9fe; color: #111827; }
