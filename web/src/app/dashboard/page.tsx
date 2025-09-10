@@ -1,8 +1,7 @@
 'use client';
 
-import { useEffect, useMemo, useRef, useState } from 'react';
-import { useRouter } from 'next/navigation';
-import { supabase } from '../../lib/supabaseClient';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { createClient } from '@supabase/supabase-js';
 
 // -------------------------------------------------
 // Types
@@ -76,7 +75,7 @@ function Button({
   disabled?: boolean;
   className?: string;
   type?: 'button' | 'submit' | 'reset';
-  ariaBusy?: boolean;
+  ariaBusy?: boolean; 
 }) {
   const base =
     'rounded-xl px-4 py-2 text-sm font-medium transition disabled:opacity-60 disabled:cursor-not-allowed focus:outline-none focus:ring-2 focus:ring-violet-400';
@@ -232,23 +231,24 @@ const csvEscape = (v: unknown): string => {
 // Page
 // -------------------------------------------------
 export default function DashboardPage() {
-  const router = useRouter();
   const [userId, setUserId] = useState<string | null>(null);
   const [activeSession, setActiveSession] = useState<SessionRow | null>(null);
   const [recent, setRecent] = useState<ContractionRow[]>([]);
   const [loading, setLoading] = useState(true);
 
+  const [pageError, setPageError] = useState<string | null>(null);
+
   // Live/manual timing state
   const [isTiming, setIsTiming] = useState(false);
   const startRef = useRef<number | null>(null);
   const [elapsed, setElapsed] = useState(0);
-  const tickRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const tickRef = useRef<number | null>(null);
   const [intensity, setIntensity] = useState(5);
   const [notes, setNotes] = useState('');
 
   // Simulated device (demo)
   const [simulateOn, setSimulateOn] = useState(false);
-  const simTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const simTimerRef = useRef<number | null>(null);
   const rand = (min: number, max: number) => Math.floor(Math.random() * (max - min + 1)) + min;
 
   // AI summary state
@@ -296,155 +296,183 @@ export default function DashboardPage() {
   const [currentThreadId, setCurrentThreadId] = useState<string | null>(null);
   const [savedOpen, setSavedOpen] = useState<boolean>(true); // collapsible “Saved chats” above Q+A
 
-  // ---------------------------------
-  // Auth + initial load
-  // ---------------------------------
-  useEffect(() => {
-    let mounted = true;
-    (async () => {
-      const { data: sessionData } = await supabase.auth.getSession();
-      const sess = sessionData.session;
-      if (!sess) {
-        router.replace('/login');
-        return;
-      }
-      const uid = sess.user.id;
-      if (!mounted) return;
-      setUserId(uid);
+// Create a browser-only Supabase client (reads/writes localStorage)
+const supabase = useMemo(() => {
+  const url = process.env.NEXT_PUBLIC_SUPABASE_URL!;
+  const key = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!;
+  if (!url || !key) console.error('Missing NEXT_PUBLIC_SUPABASE_URL or NEXT_PUBLIC_SUPABASE_ANON_KEY');
+  return createClient(url, key, {
+    auth: { persistSession: true, autoRefreshToken: true, storage: window.localStorage },
+  });
+}, []);
 
-      const { data: act } = await supabase
-        .from('sessions')
+// React to auth changes (single subscription)
+useEffect(() => {
+  const { data: sub } = supabase.auth.onAuthStateChange((_evt, session) => {
+    setUserId(session?.user?.id ?? null);
+  });
+  return () => sub.subscription.unsubscribe();
+}, [supabase]);
+
+// Fetch/paginate the contractions table (hoisted named function)
+async function loadAll(reset = false) {
+  if (!userId) return;
+  setAllLoading(true);
+  setAllError(null);
+
+  const from = reset ? 0 : allOffset;
+  const to = from + PAGE_SIZE - 1;
+
+  let query = supabase
+    .from('contractions')
+    .select('id, started_at, duration_seconds, intensity, notes, source')
+    .eq('user_id', userId);
+
+  if (filterStart) query = query.gte('started_at', new Date(filterStart).toISOString());
+  if (filterEnd) query = query.lte('started_at', new Date(filterEnd).toISOString());
+  if (filterSource !== 'all') query = query.eq('source', filterSource);
+  if (filterIntensityMin !== '') query = query.gte('intensity', Number(filterIntensityMin));
+  if (filterIntensityMax !== '') query = query.lte('intensity', Number(filterIntensityMax));
+
+  query = query.order(allSort.column, { ascending: allSort.direction === 'asc' }).range(from, to);
+
+  const { data, error } = await query;
+  if (error) {
+    setAllError(error.message);
+  } else {
+    const fetched = data ?? [];
+    if (reset) {
+      setAllCons(fetched);
+      setAllOffset(fetched.length);
+    } else {
+      setAllCons((prev) => [...prev, ...fetched]);
+      setAllOffset(from + fetched.length);
+    }
+    setAllHasMore(fetched.length === PAGE_SIZE);
+  }
+
+  setAllLoading(false);
+}
+
+
+
+// ---------------------------------
+// Auth + initial load
+// ---------------------------------
+useEffect(() => {
+  let cancelled = false;
+
+  const loadInitial = async (uid: string) => {
+    const since = new Date(Date.now() - 24 * 3600 * 1000).toISOString();
+    const [actRes, consRes] = await Promise.all([
+      supabase.from('sessions')
         .select('id, started_at, ended_at, device_id')
         .eq('user_id', uid)
         .is('ended_at', null)
         .order('started_at', { ascending: false })
-        .limit(1)
-        .maybeSingle();
-      setActiveSession(act ?? null);
-
-      const since = new Date(Date.now() - 24 * 3600 * 1000).toISOString();
-      const { data: cons } = await supabase
-        .from('contractions')
+        .limit(1),
+      supabase.from('contractions')
         .select('id, started_at, duration_seconds, intensity, notes, source')
         .eq('user_id', uid)
         .gte('started_at', since)
-        .order('started_at', { ascending: false });
-      setRecent(cons ?? []);
-      setLoading(false);
-
-      // Load chat navigation (folders + threads)
-      const { data: f } = await supabase
-        .from('chat_folders')
-        .select('id,name,created_at')
-        .eq('user_id', uid)
-        .order('created_at', { ascending: true });
-      setFolders(f ?? []);
-
-      const { data: t } = await supabase
-        .from('chat_threads')
-        .select('id,title,folder_id,started_at,updated_at,message_count')
-        .eq('user_id', uid)
-        .order('updated_at', { ascending: false });
-      setThreads(t ?? []);
-    })();
-    return () => {
-      mounted = false;
-    };
-  }, [router]);
-
-  // Load all contractions (initial + changes)
-  const loadAll = async (reset = false) => {
-    if (!userId) return;
-    setAllLoading(true);
-    setAllError(null);
-    const from = reset ? 0 : allOffset;
-    const to = from + PAGE_SIZE - 1;
-
-    let query = supabase
-      .from('contractions')
-      .select('id, started_at, duration_seconds, intensity, notes, source')
-      .eq('user_id', userId);
-
-    if (filterStart) query = query.gte('started_at', new Date(filterStart).toISOString());
-    if (filterEnd) query = query.lte('started_at', new Date(filterEnd).toISOString());
-    if (filterSource !== 'all') query = query.eq('source', filterSource);
-    if (filterIntensityMin !== '') query = query.gte('intensity', Number(filterIntensityMin));
-    if (filterIntensityMax !== '') query = query.lte('intensity', Number(filterIntensityMax));
-
-    query = query.order(allSort.column, { ascending: allSort.direction === 'asc' }).range(from, to);
-
-    const { data, error } = await query;
-    if (error) {
-      setAllError(error.message);
-    } else {
-      if (reset) setAllCons(data ?? []);
-      else setAllCons((prev) => [...prev, ...(data ?? [])]);
-      const got = data?.length ?? 0;
-      setAllOffset(from + got);
-      setAllHasMore(got === PAGE_SIZE);
-    }
-    setAllLoading(false);
+        .order('started_at', { ascending: false }),
+    ]);
+    if (cancelled) return;
+    setActiveSession((actRes.data?.[0] as SessionRow) ?? null);
+    setRecent(consRes.data ?? []);
   };
 
-  useEffect(() => {
-    if (userId) loadAll(true);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [userId]);
+  const init = async () => {
+    try {
+      const { data: sessionData, error } = await supabase.auth.getSession();
+      if (error) throw error;
+      const uid = sessionData?.session?.user?.id ?? null;
+      setUserId(uid);
+      if (uid) await loadInitial(uid);
+    } catch (e: any) {
+      setPageError(e?.message ?? 'Failed to initialize dashboard.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  init();
+  return () => { cancelled = true; };
+}, [supabase]);
+
+// Kick off the first load when we have a user
+useEffect(() => {
+  if (!userId) return;
+  setAllOffset(0);
+  setAllHasMore(true);
+  loadAll(true);
+}, [userId]);
+
 
   // ---------------------------------
   // Manual timer tick
   // ---------------------------------
   useEffect(() => {
-    if (!isTiming) return;
-    tickRef.current = setInterval(() => {
-      if (startRef.current) setElapsed(Date.now() - startRef.current);
-    }, 200);
-    return () => {
-      if (tickRef.current) clearInterval(tickRef.current);
-    };
-  }, [isTiming]);
+  if (!isTiming) return;
+
+  tickRef.current = window.setInterval(() => {
+    if (startRef.current) setElapsed(Date.now() - startRef.current);
+  }, 200);
+
+  return () => {
+    if (tickRef.current !== null) {
+      window.clearInterval(tickRef.current);
+      tickRef.current = null;
+    }
+  };
+}, [isTiming]);
+
 
   // ---------------------------------
   // Simulation loop
   // ---------------------------------
   useEffect(() => {
-    if (!simulateOn || !activeSession || !userId) {
-      if (simTimerRef.current) {
-        clearInterval(simTimerRef.current);
-        simTimerRef.current = null;
-      }
-      return;
+  if (!simulateOn || !activeSession || !userId) {
+    if (simTimerRef.current !== null) {
+      window.clearInterval(simTimerRef.current);
+      simTimerRef.current = null;
     }
-    const insertOne = async () => {
-      const startedAt = new Date();
-      const durationSec = rand(30, 90);
-      const intensityVal = rand(3, 8);
-      const { data, error } = await supabase
-        .from('contractions')
-        .insert([
-          {
-            user_id: userId,
-            session_id: activeSession.id,
-            source: 'device',
-            started_at: startedAt.toISOString(),
-            duration_seconds: durationSec,
-            intensity: intensityVal,
-            notes: 'simulated',
-          },
-        ])
-        .select('id, started_at, duration_seconds, intensity, notes, source')
-        .single();
-      if (!error && data) setRecent((prev) => [data as ContractionRow, ...prev]);
-    };
-    insertOne();
-    simTimerRef.current = setInterval(insertOne, 60_000);
-    return () => {
-      if (simTimerRef.current) {
-        clearInterval(simTimerRef.current);
-        simTimerRef.current = null;
-      }
-    };
-  }, [simulateOn, activeSession, userId]);
+    return;
+  }
+
+  const insertOne = async () => {
+    const startedAt = new Date();
+    const durationSec = rand(30, 90);
+    const intensityVal = rand(3, 8);
+    const { data, error } = await supabase
+      .from('contractions')
+      .insert([
+        {
+          user_id: userId,
+          session_id: activeSession.id,
+          source: 'device',
+          started_at: startedAt.toISOString(),
+          duration_seconds: durationSec,
+          intensity: intensityVal,
+          notes: 'simulated',
+        },
+      ])
+      .select('id, started_at, duration_seconds, intensity, notes, source')
+      .single();
+    if (!error && data) setRecent((prev) => [data as ContractionRow, ...prev]);
+  };
+
+  insertOne();
+  simTimerRef.current = window.setInterval(insertOne, 60_000);
+
+  return () => {
+    if (simTimerRef.current !== null) {
+      window.clearInterval(simTimerRef.current);
+      simTimerRef.current = null;
+    }
+  };
+}, [simulateOn, activeSession, userId]);
+
 
   // ---------------------------------
   // Stats (local)
@@ -786,6 +814,36 @@ export default function DashboardPage() {
   // ---------------------------------
   // Skeleton
   // ---------------------------------
+  if (pageError) {
+  return (
+    <div className="min-h-screen bg-violet-50 p-6 max-w-screen-2xl mx-auto">
+      <div className="rounded-xl border border-red-200 bg-red-50 p-4 text-red-800">
+        <div className="font-semibold">Dashboard failed to load</div>
+        <div className="mt-1 text-sm break-words">{pageError}</div>
+      </div>
+    </div>
+  );
+}
+
+  // If not loading and no user, show a friendly sign-in screen instead of the blur
+if (!loading && !userId) {
+  return (
+    <div className="min-h-screen bg-violet-50 p-6 max-w-screen-2xl mx-auto grid place-items-center">
+      <div className="rounded-xl border border-violet-200 bg-white/90 p-6 shadow-sm text-center">
+        <h2 className="text-lg font-semibold text-violet-900">You’re not signed in</h2>
+        <p className="mt-2 text-sm text-violet-800/80">Please sign in to view your dashboard.</p>
+        <button
+          onClick={() => window.location.assign('/login')}
+          className="mt-4 rounded-xl bg-violet-600 px-4 py-2 text-sm font-medium text-white hover:bg-violet-700"
+        >
+          Go to login
+        </button>
+      </div>
+    </div>
+  );
+}
+
+  
   if (loading) {
     return (
       <div className="min-h-screen bg-violet-50 p-6 space-y-6 max-w-screen-2xl mx-auto">
